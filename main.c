@@ -156,18 +156,37 @@ void step(struct Parser *parser) {
   parser->pos++;
 }
 
-int parse(struct Parser *parser, struct Expr *stack);
+enum ResultKind {
+  Success,
+  FieldOrMethodExpected,
+  CommaExpected,
+  Todo,
+  RParenExpected,
+  ColonExpected,
+  Unexpected,
+};
+
+struct Result {
+  enum ResultKind kind;
+  enum TokenKind val;
+};
+
+int ok(struct Result res) {
+  return res.kind == Success;
+}
+
+struct Result parse(struct Parser *parser, struct Expr *stack);
 void print_expr(struct Expr *e);
 
-int try_access(struct Parser *parser, struct Expr *stack) {
-  if (peek(parser) != Dot) return 1;
+struct Result try_access(struct Parser *parser, struct Expr *stack) {
+  if (peek(parser) != Dot) return (struct Result){ .kind = Success, .val = 0 };
   step(parser);
   char *name;
   int name_len;
   if (peek(parser) == NameToken) {
     name = parser->tokens[parser->pos].text;
     name_len = parser->tokens[parser->pos].len;
-  } else return 0;
+  } else return (struct Result){ .kind = FieldOrMethodExpected, .val = peek(parser)};
   step(parser);
   struct Expr *e = malloc(sizeof(struct Expr));
   memcpy(e, &(stack[-1]), sizeof(struct Expr));
@@ -175,14 +194,14 @@ int try_access(struct Parser *parser, struct Expr *stack) {
     int i = 0;
     while (1) {
       step(parser);
-      int ok = parse(parser, &(stack[i]));
-      if (!ok) {
-        return 0;
+      struct Result res = parse(parser, &(stack[i]));
+      if (!ok(res)) {
+        return res;
       }
       i += 1;
       if (peek(parser) == RParen) break;
       if (peek(parser) != Comma) {
-        return 0;
+        return (struct Result){ .kind = CommaExpected, .val = peek(parser) };
       }
     }
     step(parser); // step over the RParen
@@ -194,29 +213,29 @@ int try_access(struct Parser *parser, struct Expr *stack) {
     call->val.call.method = name;
     call->val.call.method_len = name_len;
     call->val.call.obj = e;
-    return 1;
+    return (struct Result){ .kind = Success, .val = 0 };
   }
   struct Expr *access = &(stack[-1]);
   access->kind = Access;
   access->val.access.field = name;
   access->val.access.len = name_len;
   access->val.access.expr = e;
-  return 1;
+  return (struct Result){ .kind = Success, .val = 0 };
 }
 
-int parse(struct Parser *parser, struct Expr *stack) {
+struct Result parse(struct Parser *parser, struct Expr *stack) {
   switch (peek(parser)) {
     case ErrorToken:
       printf("todo ErrorToken\n");
-      return 0;
+      return (struct Result){ .kind = Todo };
     case Eof:
       printf("todo Eof\n");
-      return 0;
+      return (struct Result){ .kind = Todo };
     case LParen: {
-      int ok = parse(parser, stack);
-      if (!ok) return 0;
+      struct Result res = parse(parser, stack);
+      if (!ok(res)) return res;
       step(parser);
-      if (peek(parser) != RParen) return 0;
+      if (peek(parser) != RParen) return (struct Result){ .kind = RParenExpected, .val = peek(parser) };
       step(parser);
       return try_access(parser, &(stack[1]));
     }
@@ -231,7 +250,7 @@ int parse(struct Parser *parser, struct Expr *stack) {
         if (peek(parser) == NameToken) {
           name = parser->tokens[parser->pos].text;
           name_len = parser->tokens[parser->pos].len;
-        } else return 0;
+        } else return (struct Result){ .kind = FieldOrMethodExpected, .val = peek(parser) };
         step(parser);
         struct String *param_names;
         int num_params = 0;
@@ -246,7 +265,7 @@ int parse(struct Parser *parser, struct Expr *stack) {
               param = parser->tokens[parser->pos].text;
               param_len = parser->tokens[parser->pos].len;
             } else if (peek(parser) == RParen) break; else {
-              return 0;
+              return (struct Result){ .kind = RParenExpected, .val = peek(parser) };
             }
             if (num_params == params_capacity) {
               params_capacity *= 2;
@@ -261,16 +280,16 @@ int parse(struct Parser *parser, struct Expr *stack) {
             step(parser);
             if (peek(parser) == RParen) break;
             if (peek(parser) != Comma) {
-              return 0;
+              return (struct Result){ .kind = CommaExpected, .val = peek(parser) };
             }
           }
           step(parser); // over the RParen
         }
-        if (peek(parser) != Colon) return 0;
+        if (peek(parser) != Colon) return (struct Result){ .kind = ColonExpected, .val = peek(parser) };
         step(parser);
-        int ok = parse(parser, &(stack[i]));
-        if (!ok) {
-          return 0;
+        struct Result res = parse(parser, &(stack[i]));
+        if (!ok(res)) {
+          return res;
         }
         if (i == capacity) {
           capacity *= 2;
@@ -287,7 +306,7 @@ int parse(struct Parser *parser, struct Expr *stack) {
         memcpy(fields[i].def, &(stack[i]), sizeof(struct Expr));
         i += 1;
         if (peek(parser) == RCurly) break;
-        if (peek(parser) != Comma) return 0;
+        if (peek(parser) != Comma) return (struct Result){ .kind = CommaExpected, .val = peek(parser) };
       }
       step(parser); // over the RCurly
       stack[0].kind = Object;
@@ -322,7 +341,7 @@ int parse(struct Parser *parser, struct Expr *stack) {
     case RParen:
     case RCurly:
     case Colon:
-    case Comma: return 0;
+    case Comma: return (struct Result){ .kind = Unexpected, .val = peek(parser) };
   }
 }
 
@@ -385,8 +404,11 @@ int main() {
     .tokens = tokens
   };
   struct Expr *stack = malloc(4096 * sizeof(struct Expr));
-  int ok = parse(&parser, stack);
-  if (!ok) return 0;
+  struct Result res = parse(&parser, stack);
+  if (!ok(res)) {
+    printf("parse error: %d %d\n", res.kind, res.val);
+    return 0;
+  }
   print_expr(stack);
   printf("\n");
   return 0;
