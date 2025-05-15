@@ -156,10 +156,10 @@ void step(struct Parser *parser) {
   parser->pos++;
 }
 
-int parse(struct Parser *parser, struct Expr *stack, int *stack_pos);
+int parse(struct Parser *parser, struct Expr *stack);
 void print_expr(struct Expr *e);
 
-int try_access(struct Parser *parser, struct Expr *stack, int *stack_pos) {
+int try_access(struct Parser *parser, struct Expr *stack) {
   if (peek(parser) != Dot) return 1;
   step(parser);
   char *name;
@@ -170,18 +170,15 @@ int try_access(struct Parser *parser, struct Expr *stack, int *stack_pos) {
   } else return 0;
   step(parser);
   struct Expr *e = malloc(sizeof(struct Expr));
-  memcpy(e, &(stack[*stack_pos - 1]), sizeof(struct Expr));
+  memcpy(e, &(stack[-1]), sizeof(struct Expr));
   if (peek(parser) == LParen) {
     int i = 0;
     while (1) {
       step(parser);
-      struct Expr *new_stack = &(stack[*stack_pos]);
-      int new_stack_pos = 0;
-      int ok = parse(parser, new_stack, &new_stack_pos);
-      if (!ok || new_stack_pos != 1) {
+      int ok = parse(parser, &(stack[i]));
+      if (!ok) {
         return 0;
       }
-      *stack_pos += 1; // leave the definition on the stack to be gathered later
       i += 1;
       if (peek(parser) == RParen) break;
       if (peek(parser) != Comma) {
@@ -189,25 +186,25 @@ int try_access(struct Parser *parser, struct Expr *stack, int *stack_pos) {
       }
     }
     step(parser); // step over the RParen
-    *stack_pos -= i;
-    struct Expr *call = &(stack[*stack_pos - 1]);
+    struct Expr *call = &(stack[-1]);
     call->kind = Call;
     call->val.call.args = malloc(i * sizeof(struct Expr));
-    memcpy(call->val.call.args, &(stack[*stack_pos]), i * sizeof(struct Expr));
+    memcpy(call->val.call.args, stack, i * sizeof(struct Expr));
     call->val.call.args_len = i;
     call->val.call.method = name;
     call->val.call.method_len = name_len;
     call->val.call.obj = e;
     return 1;
   }
-  stack[*stack_pos - 1].kind = Access;
-  stack[*stack_pos - 1].val.access.field = name;
-  stack[*stack_pos - 1].val.access.len = name_len;
-  stack[*stack_pos - 1].val.access.expr = e;
+  struct Expr *access = &(stack[-1]);
+  access->kind = Access;
+  access->val.access.field = name;
+  access->val.access.len = name_len;
+  access->val.access.expr = e;
   return 1;
 }
 
-int parse(struct Parser *parser, struct Expr *stack, int *stack_pos) {
+int parse(struct Parser *parser, struct Expr *stack) {
   switch (peek(parser)) {
     case ErrorToken:
       printf("todo ErrorToken\n");
@@ -216,15 +213,12 @@ int parse(struct Parser *parser, struct Expr *stack, int *stack_pos) {
       printf("todo Eof\n");
       return 0;
     case LParen: {
-      struct Expr *new_stack = &(stack[*stack_pos]);
-      int new_stack_pos = 0;
-      int ok = parse(parser, new_stack, &new_stack_pos);
-      if (!ok || new_stack_pos != 1) return 0;
+      int ok = parse(parser, stack);
+      if (!ok) return 0;
       step(parser);
       if (peek(parser) != RParen) return 0;
       step(parser);
-      *stack_pos += 1;
-      return try_access(parser, stack, stack_pos);
+      return try_access(parser, &(stack[1]));
     }
     case LCurly: {
       int capacity = 10;
@@ -274,10 +268,8 @@ int parse(struct Parser *parser, struct Expr *stack, int *stack_pos) {
         }
         if (peek(parser) != Colon) return 0;
         step(parser);
-        struct Expr *new_stack = &(stack[*stack_pos]);
-        int new_stack_pos = 0;
-        int ok = parse(parser, new_stack, &new_stack_pos);
-        if (!ok || new_stack_pos != 1) {
+        int ok = parse(parser, &(stack[i]));
+        if (!ok) {
           return 0;
         }
         if (i == capacity) {
@@ -292,28 +284,24 @@ int parse(struct Parser *parser, struct Expr *stack, int *stack_pos) {
         fields[i].def = malloc(sizeof(struct Expr));
         fields[i].params = param_names;
         fields[i].params_len = num_params;
-        memcpy(fields[i].def, &(stack[*stack_pos]), sizeof(struct Expr));
+        memcpy(fields[i].def, &(stack[i]), sizeof(struct Expr));
         i += 1;
-        *stack_pos += 1;
         if (peek(parser) == RCurly) break;
         if (peek(parser) != Comma) return 0;
       }
       step(parser); // over the RCurly
-      *stack_pos -= i;
-      stack[*stack_pos].kind = Object;
-      stack[*stack_pos].val.object.fields = fields;
-      stack[*stack_pos].val.object.len = i;
-      *stack_pos += 1;
-      return try_access(parser, stack, stack_pos);
+      stack[0].kind = Object;
+      stack[0].val.object.fields = fields;
+      stack[0].val.object.len = i;
+      return try_access(parser, &(stack[1]));
     }
     case NameToken: {
       char *name = parser->tokens[parser->pos].text;
-      stack[*stack_pos].kind = Ident;
-      stack[*stack_pos].val.ident.name = name;
-      stack[*stack_pos].val.ident.len = parser->tokens[parser->pos].len;
-      *stack_pos += 1;
+      stack[0].kind = Ident;
+      stack[0].val.ident.name = name;
+      stack[0].val.ident.len = parser->tokens[parser->pos].len;
       step(parser);
-      return try_access(parser, stack, stack_pos);
+      return try_access(parser, &(stack[1]));
     }
     case IntToken: {
       char *str_ptr = parser->tokens[parser->pos].text;
@@ -325,11 +313,10 @@ int parse(struct Parser *parser, struct Expr *stack, int *stack_pos) {
       free(str);
       if (l > INT_MAX) l = INT_MAX;
       if (l < INT_MIN) l = INT_MIN;
-      stack[*stack_pos].kind = Int;
-      stack[*stack_pos].val.int_lit.val = (int)l;
-      *stack_pos += 1;
+      stack[0].kind = Int;
+      stack[0].val.int_lit.val = (int)l;
       step(parser);
-      return try_access(parser, stack, stack_pos);
+      return try_access(parser, &(stack[1]));
     }
     case Dot: 
     case RParen:
@@ -398,8 +385,7 @@ int main() {
     .tokens = tokens
   };
   struct Expr *stack = malloc(4096 * sizeof(struct Expr));
-  int stack_pos = 0;
-  int ok = parse(&parser, stack, &stack_pos);
+  int ok = parse(&parser, stack);
   if (!ok) return 0;
   print_expr(stack);
   printf("\n");
