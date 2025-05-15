@@ -117,6 +117,7 @@ struct Object {
 struct Field {
   int name_len;
   char *name;
+  int is_method;
   int params_len;
   struct String *params;
   struct Expr *def;
@@ -253,8 +254,10 @@ struct Result parse(struct Parser *parser, struct Expr *stack) {
         } else return (struct Result){ .kind = FieldOrMethodExpected, .val = peek(parser) };
         step(parser);
         struct String *param_names;
+        int is_method = 0;
         int num_params = 0;
         if (peek(parser) == LParen) {
+          is_method = 1;
           int params_capacity = 10;
           param_names = malloc(params_capacity * sizeof(struct String));
           while (1) {
@@ -301,6 +304,7 @@ struct Result parse(struct Parser *parser, struct Expr *stack) {
         fields[i].name = name;
         fields[i].name_len = name_len;
         fields[i].def = malloc(sizeof(struct Expr));
+        fields[i].is_method = is_method;
         fields[i].params = param_names;
         fields[i].params_len = num_params;
         memcpy(fields[i].def, &(stack[i]), sizeof(struct Expr));
@@ -345,6 +349,108 @@ struct Result parse(struct Parser *parser, struct Expr *stack) {
   }
 }
 
+struct MethodDefn {
+  char *name;
+  int name_len;
+  struct String *params;
+  int params_len;
+  struct Expr *body;
+};
+
+struct ObjDefn {
+  char *name;
+  int name_len;
+  struct Field *fields;
+  int fields_len;
+};
+
+struct Expr *defns(struct Expr *node, int *id_gen, struct MethodDefn *methods_buffer, int *methods_pos, struct ObjDefn *objects_buffer, int *objects_pos) {
+  switch (node->kind) {
+    case Int: return node;
+    case Ident: {
+      struct Expr *out = malloc(sizeof(struct Expr));
+      out->kind = Ident;
+      out->val.ident.len = 1 + node->val.ident.len;
+      out->val.ident.name = malloc(out->val.ident.len + 1);
+      out->val.ident.name[0] = 'x';
+      memcpy(out->val.ident.name + 1, node->val.ident.name, node->val.ident.len);
+      return out;
+    }
+    case Access: {
+      struct Expr *obj = defns(node->val.access.expr, id_gen, methods_buffer, methods_pos, objects_buffer, objects_pos);
+      struct Expr *out = malloc(sizeof(struct Expr));
+      out->kind = Access;
+      out->val.access.expr = obj;
+      out->val.access.field = node->val.access.field;
+      out->val.access.len = node->val.access.len;
+      return out;
+    }
+    case Call: {
+      struct Expr *obj = defns(node->val.call.obj, id_gen, methods_buffer, methods_pos, objects_buffer, objects_pos);
+      struct Expr *out = malloc(sizeof(struct Expr));
+      out->kind = Call;
+      out->val.call.obj = obj;
+      out->val.call.method = node->val.call.method;
+      out->val.call.method_len = node->val.call.method_len;
+      out->val.call.args_len = node->val.call.args_len;
+      out->val.call.args = malloc(out->val.call.args_len * sizeof(struct Expr));
+      for (int i = 0; i < node->val.call.args_len; i++) {
+        struct Expr *arg = defns(&(node->val.call.args[i]), id_gen, methods_buffer, methods_pos, objects_buffer, objects_pos);
+        out->val.call.args[i] = *arg;
+      }
+      return out;
+    }
+    case Object: {
+      int id = (*id_gen)++;
+      char *id_str = malloc(8);
+      sprintf(id_str, "%d", id);
+      int id_len = strlen(id_str);
+      struct Field *fields = malloc(node->val.object.len * sizeof(struct Field));
+      int field_pos = 0;
+      for (int i = 0; i < node->val.object.len; i++) {
+        struct Field field = node->val.object.fields[i];
+        if (field.is_method) {
+          struct MethodDefn *method = &(methods_buffer[*methods_pos]);
+          *methods_pos += 1;
+          method->body = defns(field.def, id_gen, methods_buffer, methods_pos, objects_buffer, objects_pos);
+          method->name_len = 1 + id_len + field.name_len;
+          method->name = malloc(method->name_len);
+          method->name[0] = 'm';
+          strcpy(&(method->name[1]), id_str);
+          memcpy(&(method->name[1 + id_len]), field.name, field.name_len);
+          method->params_len = field.params_len;
+          method->params = malloc(field.params_len * sizeof(struct String));
+          for (int j = 0; j < field.params_len; j++) {
+            method->params[j].ptr = malloc(1 + field.params[j].len);
+            method->params[j].ptr[0] = 'x';
+            memcpy(method->params[j].ptr + 1, field.params[j].ptr, field.params[j].len);
+            method->params[j].len = 1 + field.params[j].len;
+          }
+        } else {
+          struct Field *field2 = &(fields[field_pos++]);
+          field2->def = defns(field.def, id_gen, methods_buffer, methods_pos, objects_buffer, objects_pos);
+          field2->is_method = 0;
+          field2->name = field.name;
+          field2->name_len = field.name_len;
+          field2->params_len = 0;
+        }
+      }
+      struct ObjDefn *obj = &(objects_buffer[*objects_pos]);
+      obj->name_len = 3 + id_len;
+      obj->name = malloc(obj->name_len);
+      sprintf(obj->name, "obj%s", id_str);
+      obj->fields = fields;
+      obj->fields_len = field_pos;
+      *objects_pos += 1;
+      struct Expr *out = malloc(sizeof(struct Expr));
+      out->kind = Ident;
+      out->val.ident.len = obj->name_len;
+      out->val.ident.name = obj->name;
+      return out;
+    }
+  }
+}
+
 void print_expr(struct Expr *e) {
   switch (e->kind) {
     case Ident: print_string(e->val.ident.name, e->val.ident.len); break;
@@ -354,9 +460,9 @@ void print_expr(struct Expr *e) {
       printf("{");
       for (int i = 0; i < obj.len; i++) {
         print_string(obj.fields[i].name, obj.fields[i].name_len);
-        int params_len = obj.fields[i].params_len;
-        if (params_len > 0) {
+        if (obj.fields[i].is_method) {
           printf("(");
+          int params_len = obj.fields[i].params_len;
           for (int j = 0; j < params_len; j++) {
             struct String *param = &(obj.fields[i].params[j]);
             print_string(param->ptr, param->len);
@@ -394,6 +500,36 @@ void print_expr(struct Expr *e) {
   }
 }
 
+void print_obj_defn(struct ObjDefn *obj) {
+  printf("def ");
+  print_string(obj->name, obj->name_len);
+  printf(" {\n");
+  for (int i = 0; i < obj->fields_len; i++) {
+    struct Field field = obj->fields[i];
+    printf("  ");
+    print_string(field.name, field.name_len);
+    printf(": ");
+    print_expr(field.def);
+    if (i < obj->fields_len - 1) printf(",");
+    printf("\n");
+  }
+  printf("}\n");
+}
+
+void print_method_defn(struct MethodDefn *method) {
+  printf("def ");
+  print_string(method->name, method->name_len);
+  printf("(this, ");
+  for (int i = 0; i < method->params_len; i++) {
+    struct String param = method->params[i];
+    print_string(param.ptr, param.len);
+    if (i < method->params_len - 1) printf(", ");
+  }
+  printf(") {\n  ");
+  print_expr(method->body);
+  printf("\n}\n");
+}
+
 int main() {
   char *prog = "{foo(n): n.add(2, 3), baz: 7}.baz";
   struct Token *tokens = malloc(4096 * sizeof(struct Token));
@@ -410,6 +546,16 @@ int main() {
     return 0;
   }
   print_expr(stack);
+  printf("\n");
+  struct MethodDefn *methods = malloc(4096 * sizeof(struct MethodDefn));
+  struct ObjDefn *objects = malloc(4096 * sizeof(struct ObjDefn));
+  int methods_i = 0;
+  int objects_i = 0;
+  int id_gen = 0;
+  struct Expr *ast = defns(stack, &id_gen, methods, &methods_i, objects, &objects_i);
+  for (int i = 0; i < objects_i; i++) print_obj_defn(&(objects[i]));
+  for (int i = 0; i < methods_i; i++) print_method_defn(&(methods[i]));
+  print_expr(ast);
   printf("\n");
   return 0;
 }
